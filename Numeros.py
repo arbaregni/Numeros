@@ -5,8 +5,11 @@ def cache_result(method):
         try:
             return self.__cache__[method]
         except AttributeError:
-            method.__cache__ = { method : method(self, *args, **kwargs) }
-            return method.__cache__[method]
+            self.__cache__ = { method : method(self, *args, **kwargs) }
+            return self.__cache__[method]
+        except KeyError:
+            self.__cache__[method] == method(self, *args, **kwargs)
+            return self.__cache__[method]
     return return_cache_if_present
 
 class Expression():
@@ -20,6 +23,7 @@ class Expression():
         Return a list of constant values inside this expression or its children
         """
         return list(map(lambda const: const.value, filter(lambda inp: inp.__class__ == Constant, self.expand())))
+    @cache_result
     def get_funcs(self):
         """
         Return a set of function display strings inside this expression and its children
@@ -43,6 +47,7 @@ class Expression():
         return a multiline string displaying this and all child expressions
         """
         return "{}{}: `{}`".format(prefix, self.__class__.__name__, self)
+    
         
 class Function(Expression):
     def __init__(self, func, disp, prec = None, inputs = None):
@@ -308,7 +313,7 @@ class EquationRule():
 
 class Ops:
     add = Function(lambda x, y: x + y, "{0} + {1}", 10)
-    sub = Function(lambda x, y: x - y, "{0} - {1}", 10) # interesting, subtraction must have higher precedence, or '3 - 2 + 1' is '3 - (2 + 1)'
+    sub = Function(lambda x, y: x - y, "{0} - {1}", 12) # interesting, subtraction must have higher precedence, or '3 - 2 + 1' is '3 - (2 + 1)'
     mul = Function(lambda x, y: x * y, "{0} * {1}", 20)
     div = Function(lambda x, y: x / y, "{0} / {1}", 20)
     exp = Function(lambda x, y: pow(x, y), "{0} ^ {1}", 30)
@@ -409,21 +414,38 @@ class Rules:
     mul_zero                = EquationRule(parse("a * 0"),       Constant(0), name = "Zero Annihilative Property")
     div_inverse             = EquationRule(parse("a / a"),       Constant(1), name = "Division Inverse Property")
 
+    exp_mul_to_add         = EquationRule(parse("a ^ b * a ^ c"), parse("a ^ (b + c)"), name = "Additive Property of Exponentation")
+    exp_div_to_add         = EquationRule(parse("a ^ b / a ^ c"), parse("a ^ (b - c)"), name = "Subtractive Property of Exponents")
+    exp_to_zero            = EquationRule(parse("a ^ 0"), Constant(1))
+    exp_zero               = EquationRule(parse("0 ^ a"), Constant(0))
+    exp_one                = EquationRule(parse("1 ^ a"), Constant(1))
+    exp_to_one             = EquationRule(parse("a ^ 1"), Variable('a'))
+    
     # WARNING! when you update above, update below as well
     
-    rules =    [add_communative,
-                add_identity,
-                add_associative,
-                sub_inverse,
-                sub_to_mul_by_neg_one,
-                sub_to_mul_by_neg_one.create_inverse(),
-                sub_identity,
-                add_mul_distribute,
-                sub_mul_distribute,
-                mul_communative,
-                mul_identity,
-                mul_zero,
-                div_inverse]
+    rules = [
+            add_communative,
+            add_identity,
+            add_associative,
+            sub_inverse,
+            sub_to_mul_by_neg_one,
+            sub_to_mul_by_neg_one.create_inverse(),
+            sub_identity,
+            add_mul_distribute,
+            add_mul_distribute.create_inverse(),
+            sub_mul_distribute,
+            sub_mul_distribute.create_inverse(),
+            mul_communative,
+            mul_identity,
+            mul_zero,
+            div_inverse,
+            exp_mul_to_add,
+            exp_div_to_add,
+            exp_to_zero,
+            exp_zero,
+            exp_one,
+            exp_to_one,
+            ]
     
 
 
@@ -431,17 +453,38 @@ def simplify(expr):
     simplest = expr
     simplest_record = [(expr, None)]
     shortest_length = len(list(expr.expand()))
-    for other, record in EquationRule.combinate(expr, Rules.rules):
+    for raw_other, raw_record in EquationRule.combinate(expr, Rules.rules):
+        other = const_simplify(raw_other)
         length = len(list(other.expand()))
+        print(other)
         if shortest_length == None or length < shortest_length:
             simplest = other
-            simplest_record = record
+            simplest_record = raw_record + [(other, "Simplify")]
             shortest_length = length
         elif length == shortest_length:
             ## ?
             pass
         
     return simplest, simplest_record
+
+def const_simplify(expr):
+        """
+        Return a slightly modified copy of `expr`
+        replace all expressions that involve only:
+           - Constant expressions
+           - Ops.add, Ops.sub, Ops.mul
+           - Ops.div as long as the result is an integer
+        """
+        if expr.__class__ == Function:
+                new_expr = copy.copy(expr)
+                new_expr.inputs = ().__class__(map(const_simplify, expr.inputs))
+                if expr.disp == Ops.exp.disp or expr.disp == Ops.add.disp or expr.disp == Ops.sub.disp or expr.disp == Ops.mul.disp or (expr.disp == Ops.div.disp and hasattr(new_expr.inputs[0], "num") and  hasattr(new_expr.inputs[1], "num") and expr.inputs[0].num % expr.inputs[1].num == 0):
+                    try:
+                        return Constant(new_expr.get_value())
+                    except ValueError:
+                        return new_expr
+        else:
+            return copy.copy(expr)
 
 def format_proof(record):
     if len(record) == 0: return ""
@@ -454,7 +497,7 @@ def format_proof(record):
         exprs.append(str(expr))
         nums.append(str(n))
         n += 1
-        reasons.append("Given" if rule == None else rule.name)
+        reasons.append("Given" if rule == None else rule.name if hasattr(rule, "name") else rule)
 
         recent = list(map(len, (exprs[-1], nums[-1], reasons[-1])))
         widths = ().__class__([max(widths[i], recent[i]) for i in range(3)])
@@ -462,7 +505,8 @@ def format_proof(record):
         "{0: <{width0}} | ({1: <{width1}}) {2: <{width2}}".format(exprs[i], nums[i], reasons[i], width0 = widths[0], width1 = widths[1], width2 = widths[2])
         for i in range(0, n - 1)
     ])
-        
+
+      
 while True:
     expr = parse(input())
     simplified, record = simplify(expr)
